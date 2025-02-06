@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, text
 import os
 from dotenv import load_dotenv
 import logging
+from sqlalchemy import or_, cast, String
 
 load_dotenv()
 
@@ -137,81 +138,120 @@ async def scrape_and_save_listings(search_url: str, db: Session):
             feature = db.query(Feature).filter_by(name=feature_name).first()
             feature_dict[feature_name] = feature
         
-        # Clear existing properties
-        try:
-            # İlişkili tabloları doğru sırayla temizle
-            logger.info("Veritabanı temizleme işlemi başlıyor...")
-            
-            # Her adımı ayrı ayrı loglayarak ve SQLAlchemy text() kullanarak temizle
-            db.execute(text('DELETE FROM property_features'))
-            logger.info("property_features tablosu temizlendi")
-            
-            db.execute(text('DELETE FROM property_images'))
-            logger.info("property_images tablosu temizlendi")
-            
-            db.execute(text('DELETE FROM properties'))
-            logger.info("properties tablosu temizlendi")
-            
-            db.commit()
-            logger.info("Tüm tablolar başarıyla temizlendi")
-        except Exception as e:
-            logger.error(f"Temizleme hatası: {str(e)}")
-            db.rollback()
-            return
+        # Save or update listings
+        total_new = 0
+        total_updated = 0
+        total_unchanged = 0
         
-        # Save listings in batches
-        batch_size = 50
-        total_saved = 0
-        logger.info(f"Toplam {len(listings)} ilan kaydedilecek")
-        
-        for i in range(0, len(listings), batch_size):
-            batch = listings[i:i + batch_size]
+        for listing_data in listings:
             try:
-                for listing_data in batch:
-                    # Parse price
-                    price_str = listing_data.get('fiyat', '0')
-                    try:
-                        price_str = price_str.replace('TL', '').replace('.', '').replace(',', '.').strip()
-                        price = float(price_str)
-                    except:
-                        logger.error(f"Fiyat dönüştürme hatası: {price_str}")
-                        price = 0.0
+                # URL'e göre mevcut ilanı kontrol et
+                existing_property = db.query(Property).filter_by(url=listing_data['url']).first()
+                
+                # Fiyatı parse et
+                price_str = listing_data.get('fiyat', '0')
+                try:
+                    price_str = price_str.replace('TL', '').replace('.', '').replace(',', '.').strip()
+                    price = float(price_str)
+                except:
+                    logger.error(f"Fiyat dönüştürme hatası: {price_str}")
+                    price = 0.0
 
-                    # Create property object
-                    property_obj = Property(
+                if existing_property:
+                    # İlan varsa, güncelleme gerekiyor mu kontrol et
+                    needs_update = False
+                    
+                    # Fiyat değişmiş mi?
+                    if existing_property.price != price:
+                        needs_update = True
+                        existing_property.price = price
+                    
+                    # Başlık değişmiş mi?
+                    if existing_property.title != listing_data.get('baslik'):
+                        needs_update = True
+                        existing_property.title = listing_data.get('baslik', '')
+                    
+                    # Konum değişmiş mi?
+                    if existing_property.location != listing_data.get('konum'):
+                        needs_update = True
+                        existing_property.location = listing_data.get('konum', '')
+                    
+                    # Raw data değişmiş mi?
+                    if existing_property.raw_data != listing_data:
+                        needs_update = True
+                        existing_property.raw_data = listing_data
+                    
+                    if needs_update:
+                        # Özellikleri güncelle
+                        existing_property.features.clear()
+                        if 'ozellikler' in listing_data:
+                            for feature_name in listing_data['ozellikler']:
+                                if feature_name in feature_dict:
+                                    existing_property.features.append(feature_dict[feature_name])
+                        
+                        # Resimleri güncelle
+                        existing_property.images.clear()
+                        if listing_data.get('resim'):
+                            image = PropertyImage(
+                                url=listing_data['resim'],
+                                is_primary=True
+                            )
+                            existing_property.images.append(image)
+                        
+                        existing_property.updated_at = datetime.now()
+                        db.add(existing_property)
+                        total_updated += 1
+                        logger.info(f"İlan güncellendi: {listing_data['url']}")
+                    else:
+                        total_unchanged += 1
+                        logger.info(f"İlan değişmemiş: {listing_data['url']}")
+                
+                else:
+                    # Yeni ilan oluştur
+                    new_property = Property(
                         url=listing_data['url'],
                         title=listing_data.get('baslik', ''),
                         price=price,
                         location=listing_data.get('konum', ''),
                         raw_data=listing_data,
-                        created_at=datetime.now()
+                        created_at=datetime.now(),
+                        updated_at=datetime.now()
                     )
                     
-                    # Add features
+                    # Özellikleri ekle
                     if 'ozellikler' in listing_data:
                         for feature_name in listing_data['ozellikler']:
                             if feature_name in feature_dict:
-                                property_obj.features.append(feature_dict[feature_name])
+                                new_property.features.append(feature_dict[feature_name])
                     
-                    # Add image
+                    # Resmi ekle
                     if listing_data.get('resim'):
                         image = PropertyImage(
                             url=listing_data['resim'],
                             is_primary=True
                         )
-                        property_obj.images.append(image)
+                        new_property.images.append(image)
                     
-                    db.add(property_obj)
-                    total_saved += 1
+                    db.add(new_property)
+                    total_new += 1
+                    logger.info(f"Yeni ilan eklendi: {listing_data['url']}")
                 
-                # Commit batch
-                db.commit()
-                logger.info(f"Batch {i//batch_size + 1} kaydedildi ({len(batch)} ilan). Toplam kaydedilen: {total_saved}/{len(listings)}")
+                # Her 50 işlemde bir commit yap
+                if (total_new + total_updated) % 50 == 0:
+                    db.commit()
+                    logger.info(f"Ara commit yapıldı. Yeni: {total_new}, Güncellenen: {total_updated}, Değişmeyen: {total_unchanged}")
                 
             except Exception as e:
-                logger.error(f"Batch {i//batch_size + 1} kaydedilirken hata: {str(e)}")
-                db.rollback()
+                logger.error(f"İlan işlenirken hata: {str(e)}")
                 continue
+        
+        # Final commit
+        try:
+            db.commit()
+            logger.info(f"İşlem tamamlandı. Yeni: {total_new}, Güncellenen: {total_updated}, Değişmeyen: {total_unchanged}")
+        except Exception as e:
+            logger.error(f"Final commit hatası: {str(e)}")
+            db.rollback()
         
     except Exception as e:
         logger.error(f"Genel hata: {str(e)}")
@@ -251,12 +291,18 @@ async def get_properties(
     local_kw: str = Query('', description="Local keyword"),
     min_price: Optional[float] = Query(None, description="Minimum price"),
     max_price: Optional[float] = Query(None, description="Maximum price"),
-    location: str = Query('', description="Location"),
+    category: str = Query('', description="Property category (konut, arsa, isyeri)"),
+    province: str = Query('', description="Province (il)"),
+    district: str = Query('', description="District (ilçe)"),
+    neighborhood: str = Query('', description="Neighborhood (mahalle)"),
     db: Session = Depends(get_db)
 ):
     """Get all properties with optional filters."""
     try:
-        logger.info(f"Received request with params: skip={skip}, limit={limit}, local_kw={local_kw}, min_price={min_price}, max_price={max_price}, location={location}")
+        logger.info(f"Received request with params: skip={skip}, limit={limit}, "
+                   f"local_kw={local_kw}, min_price={min_price}, max_price={max_price}, "
+                   f"category={category}, province={province}, district={district}, "
+                   f"neighborhood={neighborhood}")
         
         # Base query with eager loading of relationships
         query = db.query(Property).options(
@@ -269,14 +315,36 @@ async def get_properties(
         try:
             if local_kw:
                 query = query.filter(Property.title.ilike(f"%{local_kw}%"))
+            
             if min_price is not None:
                 query = query.filter(Property.price >= min_price)
+            
             if max_price is not None:
                 if min_price is not None and max_price < min_price:
                     raise HTTPException(status_code=400, detail="Maximum price cannot be less than minimum price")
                 query = query.filter(Property.price <= max_price)
-            if location:
-                query = query.filter(Property.location.ilike(f"%{location}%"))
+            
+            # Kategori filtresi
+            if category:
+                query = query.filter(
+                    or_(
+                        Property.property_type.ilike(f"%{category}%"),
+                        cast(Property.raw_data['ilan_tipi'], String).ilike(f"%{category}%")
+                    )
+                )
+            
+            # İl filtresi
+            if province:
+                query = query.filter(Property.location.ilike(f"%{province}%"))
+            
+            # İlçe filtresi
+            if district:
+                query = query.filter(Property.location.ilike(f"%{district}%"))
+            
+            # Mahalle filtresi
+            if neighborhood:
+                query = query.filter(Property.location.ilike(f"%{neighborhood}%"))
+                
         except Exception as filter_error:
             logger.error(f"Error applying filters: {str(filter_error)}")
             raise HTTPException(status_code=400, detail=f"Invalid filter parameters: {str(filter_error)}")
@@ -420,6 +488,82 @@ async def get_search_history():
     try:
         history = db.query(SearchHistory).order_by(SearchHistory.created_at.desc()).all()
         return history
+    finally:
+        db.close()
+
+@app.get("/locations")
+async def get_locations(db: Session = Depends(get_db)):
+    """Get all unique provinces, districts and neighborhoods from properties."""
+    try:
+        # Tüm location bilgilerini al
+        locations = db.query(Property.location).distinct().all()
+        
+        # İl, ilçe ve mahalle bilgilerini ayır
+        provinces = set()
+        districts = set()
+        neighborhoods = set()
+        
+        for loc in locations:
+            if loc[0]:  # location None değilse
+                parts = loc[0].split('/')  # "İstanbul / Beşiktaş / Nisbetiye Mah." formatını ayır
+                parts = [p.strip() for p in parts]  # Boşlukları temizle
+                
+                if len(parts) >= 1:
+                    provinces.add(parts[0])
+                if len(parts) >= 2:
+                    districts.add(parts[1])
+                if len(parts) >= 3:
+                    neighborhoods.add(parts[2])
+        
+        return {
+            "provinces": sorted(list(provinces)),
+            "districts": sorted(list(districts)),
+            "neighborhoods": sorted(list(neighborhoods))
+        }
+    except Exception as e:
+        logger.error(f"Error fetching locations: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+@app.get("/categories")
+async def get_categories(db: Session = Depends(get_db)):
+    """Get all unique property categories."""
+    try:
+        # Property type ve raw_data'dan kategorileri al
+        categories = set()
+        
+        # Property type'dan kategorileri al
+        property_types = db.query(Property.property_type).distinct().all()
+        for pt in property_types:
+            if pt[0]:
+                categories.add(pt[0].lower())
+        
+        # Raw data'dan kategorileri al
+        raw_types = db.query(
+            cast(Property.raw_data['ilan_tipi'], String)
+        ).distinct().all()
+        
+        for rt in raw_types:
+            if rt[0]:
+                categories.add(rt[0].lower())
+        
+        # Temel kategorilere ayır
+        mapped_categories = set()
+        for category in categories:
+            if 'konut' in category or 'daire' in category or 'ev' in category:
+                mapped_categories.add('konut')
+            elif 'arsa' in category or 'tarla' in category:
+                mapped_categories.add('arsa')
+            elif 'isyeri' in category or 'işyeri' in category or 'dükkan' in category or 'ofis' in category:
+                mapped_categories.add('isyeri')
+        
+        return {
+            "categories": sorted(list(mapped_categories))
+        }
+    except Exception as e:
+        logger.error(f"Error fetching categories: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
 

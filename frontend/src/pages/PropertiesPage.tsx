@@ -15,6 +15,8 @@ import {
   InputAdornment,
   CircularProgress,
   Alert,
+  Select,
+  MenuItem,
 } from '@mui/material';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
@@ -43,7 +45,11 @@ interface FilterParams {
   minPrice?: number;
   maxPrice?: number;
   location?: string;
-  localKw?: string;  // Arama için keyword eklendi
+  localKw?: string;
+  category?: string;  // Konut, Arsa, İşyeri
+  province?: string;  // İl
+  district?: string;  // İlçe
+  neighborhood?: string;  // Mahalle
 }
 
 interface PaginatedResponse {
@@ -55,15 +61,46 @@ interface PaginatedResponse {
   has_previous: boolean;
 }
 
+interface LocationData {
+  provinces: string[];
+  districts: string[];
+  neighborhoods: string[];
+}
+
+interface CategoryData {
+  categories: string[];
+}
+
 const PropertiesPage: React.FC = () => {
   const [filters, setFilters] = useState<FilterParams>({
     localKw: '',
     minPrice: undefined,
     maxPrice: undefined,
-    location: ''
+    location: '',
+    category: '',
+    province: '',
+    district: '',
+    neighborhood: ''
   });
   const [page, setPage] = useState(1);
   const limit = 12;
+
+  // Konum ve kategori verilerini çek
+  const { data: locationData } = useQuery<LocationData>({
+    queryKey: ['locations'],
+    queryFn: async () => {
+      const response = await axios.get('http://localhost:8000/locations');
+      return response.data;
+    }
+  });
+
+  const { data: categoryData } = useQuery<CategoryData>({
+    queryKey: ['categories'],
+    queryFn: async () => {
+      const response = await axios.get('http://localhost:8000/categories');
+      return response.data;
+    }
+  });
 
   const { data: response, isLoading, error } = useQuery<PaginatedResponse>({
     queryKey: ['properties', page, filters],
@@ -76,6 +113,10 @@ const PropertiesPage: React.FC = () => {
           min_price: filters.minPrice,
           max_price: filters.maxPrice,
           location: filters.location,
+          category: filters.category,
+          province: filters.province,
+          district: filters.district,
+          neighborhood: filters.neighborhood
         },
       });
       return response.data;
@@ -116,6 +157,85 @@ const PropertiesPage: React.FC = () => {
       <Card sx={{ mb: 4, p: 2 }}>
         <form onSubmit={handleFilterSubmit}>
           <Grid container spacing={2} alignItems="flex-end">
+            {/* Kategori seçimi */}
+            <Grid item xs={12} sm={6} md={3}>
+              <FormControl fullWidth>
+                <InputLabel>Kategori</InputLabel>
+                <Select
+                  value={filters.category || ''}
+                  onChange={(e) => setFilters(prev => ({ ...prev, category: e.target.value }))}
+                  label="Kategori"
+                >
+                  <MenuItem value="">Tümü</MenuItem>
+                  {categoryData?.categories.map((category) => (
+                    <MenuItem key={category} value={category}>
+                      {category === 'konut' ? 'Konut' : 
+                       category === 'arsa' ? 'Arsa' : 
+                       category === 'isyeri' ? 'İşyeri' : category}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+
+            {/* İl seçimi */}
+            <Grid item xs={12} sm={6} md={3}>
+              <FormControl fullWidth>
+                <InputLabel>İl</InputLabel>
+                <Select
+                  value={filters.province || ''}
+                  onChange={(e) => setFilters(prev => ({ ...prev, province: e.target.value }))}
+                  label="İl"
+                >
+                  <MenuItem value="">Tümü</MenuItem>
+                  {locationData?.provinces.map((province) => (
+                    <MenuItem key={province} value={province}>
+                      {province}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+
+            {/* İlçe seçimi */}
+            <Grid item xs={12} sm={6} md={3}>
+              <FormControl fullWidth>
+                <InputLabel>İlçe</InputLabel>
+                <Select
+                  value={filters.district || ''}
+                  onChange={(e) => setFilters(prev => ({ ...prev, district: e.target.value }))}
+                  label="İlçe"
+                >
+                  <MenuItem value="">Tümü</MenuItem>
+                  {locationData?.districts.map((district) => (
+                    <MenuItem key={district} value={district}>
+                      {district}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+
+            {/* Mahalle seçimi */}
+            <Grid item xs={12} sm={6} md={3}>
+              <FormControl fullWidth>
+                <InputLabel>Mahalle</InputLabel>
+                <Select
+                  value={filters.neighborhood || ''}
+                  onChange={(e) => setFilters(prev => ({ ...prev, neighborhood: e.target.value }))}
+                  label="Mahalle"
+                >
+                  <MenuItem value="">Tümü</MenuItem>
+                  {locationData?.neighborhoods.map((neighborhood) => (
+                    <MenuItem key={neighborhood} value={neighborhood}>
+                      {neighborhood}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+
+            {/* Mevcut filtreler */}
             <Grid item xs={12} sm={6} md={3}>
               <TextField
                 fullWidth
@@ -126,6 +246,7 @@ const PropertiesPage: React.FC = () => {
                 placeholder="İlan başlığında ara..."
               />
             </Grid>
+
             <Grid item xs={12} sm={6} md={3}>
               <FormControl fullWidth variant="outlined">
                 <InputLabel htmlFor="min-price">Minimum Fiyat</InputLabel>
@@ -139,6 +260,7 @@ const PropertiesPage: React.FC = () => {
                 />
               </FormControl>
             </Grid>
+
             <Grid item xs={12} sm={6} md={3}>
               <FormControl fullWidth variant="outlined">
                 <InputLabel htmlFor="max-price">Maksimum Fiyat</InputLabel>
@@ -152,15 +274,28 @@ const PropertiesPage: React.FC = () => {
                 />
               </FormControl>
             </Grid>
-            <Grid item xs={12} sm={6} md={3}>
-              <TextField
-                fullWidth
-                label="Konum"
-                variant="outlined"
-                value={filters.location || ''}
-                onChange={handleFilterChange('location')}
-                placeholder="Konum ara..."
-              />
+
+            <Grid item xs={12}>
+              <Box sx={{ display: 'flex', gap: 2, justifyContent: 'flex-end' }}>
+                <Button
+                  variant="outlined"
+                  onClick={() => setFilters({
+                    localKw: '',
+                    minPrice: undefined,
+                    maxPrice: undefined,
+                    location: '',
+                    category: '',
+                    province: '',
+                    district: '',
+                    neighborhood: ''
+                  })}
+                >
+                  Filtreleri Temizle
+                </Button>
+                <Button type="submit" variant="contained" color="primary">
+                  Filtrele
+                </Button>
+              </Box>
             </Grid>
           </Grid>
         </form>
