@@ -49,6 +49,12 @@ interface PropertyDetail {
     membership_status?: string;
     profile_url?: string;
   };
+  raw_data?: {
+    danısman_adi?: string;
+    ilan_no?: string;
+    telefon_numaralari?: string[];
+    emlak_ofisi?: string;
+  };
 }
 
 const PropertyDetailPage: React.FC = () => {
@@ -232,9 +238,31 @@ const PropertyDetailPage: React.FC = () => {
                 Tel: {property.seller_info.phone}
               </Typography>
             )}
-            {property?.seller_info?.membership_status && (
+            {property?.raw_data?.danısman_adi && (
+              <Typography variant="body1" sx={{ mt: 2 }}>
+                Danışman: {property.raw_data.danısman_adi}
+              </Typography>
+            )}
+            {property?.raw_data?.ilan_no && (
               <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                Üyelik: {property.seller_info.membership_status}
+                {property.raw_data.ilan_no}
+              </Typography>
+            )}
+            {property?.raw_data?.telefon_numaralari && property.raw_data.telefon_numaralari.length > 0 && (
+              <>
+                <Typography variant="body1" sx={{ mt: 2 }}>
+                  İletişim:
+                </Typography>
+                {property.raw_data.telefon_numaralari.map((phone: string, index: number) => (
+                  <Typography key={index} variant="body2" sx={{ mt: 0.5 }}>
+                    {phone}
+                  </Typography>
+                ))}
+              </>
+            )}
+            {property?.raw_data?.emlak_ofisi && (
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+                {property.raw_data.emlak_ofisi}
               </Typography>
             )}
           </Paper>

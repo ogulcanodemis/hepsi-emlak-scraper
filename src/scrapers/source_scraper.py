@@ -169,7 +169,10 @@ class SourceScraper:
         listing_items = container.select('li.listing-item')
         logger.info(f"Bulunan ilan sayısı: {len(listing_items)}")
         
-        for item in listing_items:
+        # Her ilan için Selenium elementlerini bul
+        selenium_items = self.driver.find_elements(By.CSS_SELECTOR, 'li.listing-item')
+        
+        for idx, (item, selenium_item) in enumerate(zip(listing_items, selenium_items)):
             try:
                 listing = {}
                 
@@ -265,39 +268,50 @@ class SourceScraper:
                 office_link = item.select_one('a[href*="/emlak-ofisi/"]')
                 if office_link and office_link.get('href'):
                     listing['emlak_ofisi_url'] = f"https://www.hepsiemlak.com{office_link['href']}"
-                
-                # Fotoğraf sayısı
-                photo_count = item.select_one('span.photo-count')
-                if photo_count:
-                    listing['fotograf_sayisi'] = photo_count.text.strip()
 
-                # Telefon numaralarını al
+                # İlan sahibi bilgileri ve telefon numaraları
                 try:
-                    # Telefon göster butonunu bul ve tıkla
-                    phone_button = self.driver.find_element(By.CSS_SELECTOR, f"li#{item.get('id')} button.action-telephone")
+                    # Selenium ile ilgili ilanın telefon butonunu bul
+                    phone_button = selenium_item.find_element(By.CSS_SELECTOR, 'button.action-telephone')
+                    # JavaScript ile tıklama işlemi
                     self.driver.execute_script("arguments[0].click();", phone_button)
-                    time.sleep(1)  # Numaraların yüklenmesini bekle
+                    # Bilgilerin yüklenmesini bekle
+                    time.sleep(2)
 
-                    # Telefon numaralarını topla
+                    # Açılan telefon container'ını bul
+                    phone_container = selenium_item.find_element(By.CSS_SELECTOR, 'div.list-phone-container')
+                    
+                    # Danışman adını al
+                    consultant_name = phone_container.find_element(By.CSS_SELECTOR, 'span.phone-consultant-name').text.strip()
+                    listing['danısman_adi'] = consultant_name
+                    logger.info(f"Danışman adı: {consultant_name}")
+
+                    # İlan numarasını al
+                    listing_id = phone_container.find_element(By.CSS_SELECTOR, 'span.phone-listing-id').text.strip()
+                    listing['ilan_no'] = listing_id
+                    logger.info(f"İlan no: {listing_id}")
+
+                    # Telefon numaralarını al
                     phone_numbers = []
-                    phone_elements = self.driver.find_elements(By.CSS_SELECTOR, f"li#{item.get('id')} ul.list-phone-numbers li a")
+                    phone_elements = phone_container.find_elements(By.CSS_SELECTOR, 'ul.list-phone-numbers li a')
                     for phone_elem in phone_elements:
                         phone_number = phone_elem.text.strip()
                         if phone_number:
                             phone_numbers.append(phone_number)
-
-                    # Danışman adını al
-                    consultant_name = self.driver.find_element(By.CSS_SELECTOR, f"li#{item.get('id')} span.phone-consultant-name").text.strip()
                     
                     listing['telefon_numaralari'] = phone_numbers
-                    listing['danısman_adi'] = consultant_name
                     logger.info(f"Telefon numaraları: {phone_numbers}")
-                    logger.info(f"Danışman adı: {consultant_name}")
+
+                    # Telefon penceresini kapat
+                    close_button = phone_container.find_element(By.CSS_SELECTOR, 'a.close-list-phone-wrapper')
+                    self.driver.execute_script("arguments[0].click();", close_button)
+                    time.sleep(1)
 
                 except Exception as e:
                     logger.error(f"Telefon numaraları alınırken hata: {str(e)}")
                     listing['telefon_numaralari'] = []
                     listing['danısman_adi'] = ""
+                    listing['ilan_no'] = ""
                 
                 if listing:  # Eğer en az bir bilgi varsa listeye ekle
                     listings.append(listing)
