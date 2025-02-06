@@ -8,7 +8,7 @@ from pydantic import BaseModel, HttpUrl
 from .models.database import init_db, Property, Feature, PropertyImage, Seller, SearchHistory
 from .scrapers.source_scraper import SourceScraper
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import os
 from dotenv import load_dotenv
 import logging
@@ -80,14 +80,25 @@ class PropertyResponse(BaseModel):
             datetime: lambda v: v.isoformat() if v else None
         }
 
+class PaginatedResponse(BaseModel):
+    items: List[PropertyResponse]
+    total: int
+    page: int
+    total_pages: int
+    has_next: bool
+    has_previous: bool
+
+    class Config:
+        from_attributes = True
+
 async def scrape_and_save_listings(search_url: str, db: Session):
     """Background task to scrape and save listings."""
     logger.info(f"Scraping başlıyor: {search_url}")
     
     scraper = SourceScraper()
     try:
-        # Get all listings from search results
-        listings = scraper.search_listings(search_url)
+        # Get all listings from search results with pagination
+        listings = scraper.search_listings_with_pagination(search_url, use_pagination=True)
         logger.info(f"Bulunan ilan sayısı: {len(listings)}")
         
         # Save search history
@@ -112,59 +123,95 @@ async def scrape_and_save_listings(search_url: str, db: Session):
             if not feature:
                 feature = Feature(name=feature_name)
                 db.add(feature)
-                db.flush()  # ID'leri almak için flush
-            feature_dict[feature_name] = feature
         
-        # Save each listing
-        for listing_data in listings:
-            try:
-                # Parse price
-                price_str = listing_data.get('fiyat', '0')
-                try:
-                    price_str = price_str.replace('TL', '').replace('.', '').replace(',', '.').strip()
-                    price = float(price_str)
-                except:
-                    logger.error(f"Fiyat dönüştürme hatası: {price_str}")
-                    price = 0.0
-
-                # Create property object
-                property_obj = Property(
-                    url=listing_data['url'],
-                    title=listing_data.get('baslik', ''),
-                    price=price,
-                    location=listing_data.get('konum', ''),
-                    raw_data=listing_data,
-                    created_at=datetime.now()
-                )
-                
-                # Add features
-                if 'ozellikler' in listing_data:
-                    for feature_name in listing_data['ozellikler']:
-                        if feature_name in feature_dict:
-                            property_obj.features.append(feature_dict[feature_name])
-                
-                # Add image
-                if listing_data.get('resim'):
-                    image = PropertyImage(
-                        url=listing_data['resim'],
-                        is_primary=True
-                    )
-                    property_obj.images.append(image)
-                
-                db.add(property_obj)
-                logger.info(f"İlan kaydedildi: {listing_data.get('baslik', 'Başlıksız')}")
-                
-            except Exception as e:
-                logger.error(f"İlan kaydedilirken hata: {str(e)}")
-                continue
-        
-        # Commit all changes
+        # Commit features first
         try:
             db.commit()
-            logger.info("Tüm değişiklikler kaydedildi")
         except Exception as e:
-            logger.error(f"Veritabanı commit hatası: {str(e)}")
+            logger.error(f"Feature commit hatası: {str(e)}")
             db.rollback()
+            return
+            
+        # Refresh feature dictionary after commit
+        for feature_name in all_features:
+            feature = db.query(Feature).filter_by(name=feature_name).first()
+            feature_dict[feature_name] = feature
+        
+        # Clear existing properties
+        try:
+            # İlişkili tabloları doğru sırayla temizle
+            logger.info("Veritabanı temizleme işlemi başlıyor...")
+            
+            # Her adımı ayrı ayrı loglayarak ve SQLAlchemy text() kullanarak temizle
+            db.execute(text('DELETE FROM property_features'))
+            logger.info("property_features tablosu temizlendi")
+            
+            db.execute(text('DELETE FROM property_images'))
+            logger.info("property_images tablosu temizlendi")
+            
+            db.execute(text('DELETE FROM properties'))
+            logger.info("properties tablosu temizlendi")
+            
+            db.commit()
+            logger.info("Tüm tablolar başarıyla temizlendi")
+        except Exception as e:
+            logger.error(f"Temizleme hatası: {str(e)}")
+            db.rollback()
+            return
+        
+        # Save listings in batches
+        batch_size = 50
+        total_saved = 0
+        logger.info(f"Toplam {len(listings)} ilan kaydedilecek")
+        
+        for i in range(0, len(listings), batch_size):
+            batch = listings[i:i + batch_size]
+            try:
+                for listing_data in batch:
+                    # Parse price
+                    price_str = listing_data.get('fiyat', '0')
+                    try:
+                        price_str = price_str.replace('TL', '').replace('.', '').replace(',', '.').strip()
+                        price = float(price_str)
+                    except:
+                        logger.error(f"Fiyat dönüştürme hatası: {price_str}")
+                        price = 0.0
+
+                    # Create property object
+                    property_obj = Property(
+                        url=listing_data['url'],
+                        title=listing_data.get('baslik', ''),
+                        price=price,
+                        location=listing_data.get('konum', ''),
+                        raw_data=listing_data,
+                        created_at=datetime.now()
+                    )
+                    
+                    # Add features
+                    if 'ozellikler' in listing_data:
+                        for feature_name in listing_data['ozellikler']:
+                            if feature_name in feature_dict:
+                                property_obj.features.append(feature_dict[feature_name])
+                    
+                    # Add image
+                    if listing_data.get('resim'):
+                        image = PropertyImage(
+                            url=listing_data['resim'],
+                            is_primary=True
+                        )
+                        property_obj.images.append(image)
+                    
+                    db.add(property_obj)
+                    total_saved += 1
+                
+                # Commit batch
+                db.commit()
+                logger.info(f"Batch {i//batch_size + 1} kaydedildi ({len(batch)} ilan). Toplam kaydedilen: {total_saved}/{len(listings)}")
+                
+            except Exception as e:
+                logger.error(f"Batch {i//batch_size + 1} kaydedilirken hata: {str(e)}")
+                db.rollback()
+                continue
         
     except Exception as e:
         logger.error(f"Genel hata: {str(e)}")
@@ -197,7 +244,7 @@ async def start_scraping(
     finally:
         db.close()
 
-@app.get("/properties", response_model=List[PropertyResponse])
+@app.get("/properties", response_model=PaginatedResponse)
 async def get_properties(
     skip: int = Query(0, description="Number of records to skip"),
     limit: int = Query(12, description="Number of records to return"),
@@ -244,7 +291,7 @@ async def get_properties(
             raise HTTPException(status_code=500, detail=f"Database query error: {str(query_error)}")
         
         # Convert to response model
-        response = []
+        response_items = []
         for prop in properties:
             try:
                 raw_data = prop.raw_data or {}
@@ -271,12 +318,23 @@ async def get_properties(
                     seller_info=seller_info,
                     raw_data=raw_data
                 )
-                response.append(property_response)
+                response_items.append(property_response)
             except Exception as prop_error:
                 logger.error(f"Error processing property {prop.id}: {str(prop_error)}")
                 continue
+
+        # Calculate pagination info
+        current_page = skip // limit + 1
+        total_pages = (total + limit - 1) // limit
             
-        return response
+        return PaginatedResponse(
+            items=response_items,
+            total=total,
+            page=current_page,
+            total_pages=total_pages,
+            has_next=current_page < total_pages,
+            has_previous=current_page > 1
+        )
         
     except HTTPException as http_error:
         logger.error(f"HTTP error in get_properties: {str(http_error)}")

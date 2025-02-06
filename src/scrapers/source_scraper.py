@@ -309,21 +309,107 @@ class SourceScraper:
         
         return listings
 
-    def search_listings(self, search_url: str) -> List[Dict]:
-        """Arama URL'inden ilanları topla"""
+    def _is_last_page(self, html: str) -> bool:
+        """Sayfanın son sayfa olup olmadığını kontrol et"""
         try:
-            # Sayfa kaynağını al
-            html = self.get_page_source(search_url)
-            if not html:
-                logger.error("Sayfa kaynağı alınamadı")
-                return []
+            soup = BeautifulSoup(html, 'html.parser')
             
-            # İlanları parse et
-            listings = self.parse_listings(html)
-            logger.info(f"Toplam {len(listings)} ilan başarıyla toplandı")
+            # Sonraki sayfa butonunu kontrol et
+            next_button = soup.select_one('a.he-pagination__navigate-text--next')
+            if not next_button or 'disabled' in next_button.get('class', []):
+                return True
             
-            return listings
+            # Alternatif kontrol: Sayfa numaralarını kontrol et
+            pagination = soup.select('ul.he-pagination__links li')
+            if pagination:
+                current_page = soup.select_one('li.he-pagination__item--active')
+                if current_page and current_page == pagination[-1]:
+                    return True
             
+            return False
+            
+        except Exception as e:
+            logger.error(f"Sayfa kontrolü yapılırken hata: {str(e)}")
+            return True  # Hata durumunda son sayfa olarak kabul et
+
+    def search_all_pages(self, base_url: str) -> List[Dict]:
+        """Tüm sayfalardaki ilanları topla"""
+        all_listings = []
+        current_page = 1
+        
+        while True:
+            try:
+                # URL'i oluştur
+                current_url = base_url
+                if current_page > 1:
+                    if '?' in base_url:
+                        current_url += f'&page={current_page}'
+                    else:
+                        current_url += f'?page={current_page}'
+                
+                logger.info(f"Sayfa {current_page} işleniyor: {current_url}")
+                
+                # Sayfa kaynağını al
+                html = self.get_page_source(current_url)
+                if not html:
+                    logger.error(f"Sayfa {current_page} için kaynak kodu alınamadı")
+                    break
+                
+                # İlanları parse et
+                page_listings = self.parse_listings(html)
+                
+                # Eğer sayfa boşsa veya hiç ilan bulunamadıysa döngüyü kır
+                if not page_listings:
+                    logger.info(f"Sayfa {current_page} boş, işlem sonlandırılıyor")
+                    break
+                
+                # İlanları ana listeye ekle
+                all_listings.extend(page_listings)
+                logger.info(f"Sayfa {current_page}: {len(page_listings)} ilan eklendi. Toplam: {len(all_listings)}")
+                
+                # Son sayfa kontrolü
+                if self._is_last_page(html):
+                    logger.info("Son sayfaya ulaşıldı")
+                    break
+                
+                # Sonraki sayfaya geç
+                current_page += 1
+                
+                # Anti-bot önlemi: Rastgele bekleme
+                time.sleep(random.uniform(3, 5))
+                
+                # Belirli bir sayfa limitini aşınca dur (opsiyonel)
+                if current_page > 20:  # Maksimum 20 sayfa
+                    logger.info("Maksimum sayfa limitine ulaşıldı")
+                    break
+                
+            except Exception as e:
+                logger.error(f"Sayfa {current_page} işlenirken hata: {str(e)}")
+                break
+            
+        logger.info(f"Toplam {len(all_listings)} ilan başarıyla toplandı")
+        return all_listings
+
+    def search_listings_with_pagination(self, search_url: str, use_pagination: bool = False) -> List[Dict]:
+        """
+        İlanları topla. use_pagination=True ise tüm sayfaları dolaşır.
+        """
+        try:
+            if use_pagination:
+                return self.search_all_pages(search_url)
+            else:
+                # Sayfa kaynağını al
+                html = self.get_page_source(search_url)
+                if not html:
+                    logger.error("Sayfa kaynağı alınamadı")
+                    return []
+                
+                # İlanları parse et
+                listings = self.parse_listings(html)
+                logger.info(f"Toplam {len(listings)} ilan başarıyla toplandı")
+                
+                return listings
+                
         except Exception as e:
             logger.error(f"İlan toplama hatası: {str(e)}")
             return []

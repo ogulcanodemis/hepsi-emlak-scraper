@@ -46,6 +46,15 @@ interface FilterParams {
   localKw?: string;  // Arama için keyword eklendi
 }
 
+interface PaginatedResponse {
+  items: Property[];
+  total: number;
+  page: number;
+  total_pages: number;
+  has_next: boolean;
+  has_previous: boolean;
+}
+
 const PropertiesPage: React.FC = () => {
   const [filters, setFilters] = useState<FilterParams>({
     localKw: '',
@@ -56,14 +65,14 @@ const PropertiesPage: React.FC = () => {
   const [page, setPage] = useState(1);
   const limit = 12;
 
-  const { data: properties, isLoading, error } = useQuery<Property[]>({
+  const { data: response, isLoading, error } = useQuery<PaginatedResponse>({
     queryKey: ['properties', page, filters],
     queryFn: async () => {
       const response = await axios.get('http://localhost:8000/properties', {
         params: {
           skip: (page - 1) * limit,
           limit,
-          local_kw: filters.localKw,  // Keyword parametresi eklendi
+          local_kw: filters.localKw,
           min_price: filters.minPrice,
           max_price: filters.maxPrice,
           location: filters.location,
@@ -166,7 +175,7 @@ const PropertiesPage: React.FC = () => {
 
       {/* Property Grid */}
       <Grid container spacing={3}>
-        {properties?.map((property: Property) => (
+        {response?.items?.map((property: Property) => (
           <Grid item xs={12} sm={6} md={4} key={property.id}>
             <Card
               component={Link}
@@ -219,10 +228,10 @@ const PropertiesPage: React.FC = () => {
       </Grid>
 
       {/* Pagination Info */}
-      {!isLoading && properties && (
+      {!isLoading && response && (
         <Box sx={{ mt: 2, mb: 2, textAlign: 'center' }}>
           <Typography variant="body2" color="text.secondary">
-            Gösterilen: {((page - 1) * limit) + 1} - {((page - 1) * limit) + properties.length}
+            Toplam {response.total} ilan içinden {((page - 1) * limit) + 1} - {Math.min(page * limit, response.total)} arası gösteriliyor
           </Typography>
         </Box>
       )}
@@ -231,14 +240,14 @@ const PropertiesPage: React.FC = () => {
       <Box sx={{ mt: 4, display: 'flex', justifyContent: 'center', gap: 2 }}>
         <Button
           variant="outlined"
-          disabled={page === 1 || isLoading}
+          disabled={!response?.has_previous || isLoading}
           onClick={() => setPage((p) => Math.max(1, p - 1))}
         >
           Önceki Sayfa
         </Button>
         <Button
           variant="outlined"
-          disabled={!properties || properties.length < limit || isLoading}
+          disabled={!response?.has_next || isLoading}
           onClick={() => setPage((p) => p + 1)}
         >
           Sonraki Sayfa
