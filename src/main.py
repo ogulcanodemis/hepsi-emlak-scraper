@@ -12,7 +12,15 @@ from sqlalchemy import create_engine, text
 import os
 from dotenv import load_dotenv
 import logging
-from sqlalchemy import or_, cast, String
+from sqlalchemy import or_, cast, String, func
+from .models.schemas import (
+    PropertyStatus, 
+    PropertyCategory, 
+    ScrapeRequest, 
+    LocationResponse, 
+    CategoryResponse
+)
+from .utils.url_builder import create_hepsiemlak_url
 
 load_dotenv()
 
@@ -92,20 +100,30 @@ class PaginatedResponse(BaseModel):
     class Config:
         from_attributes = True
 
-async def scrape_and_save_listings(search_url: str, db: Session):
+async def scrape_and_save_listings(search_url: str, kategori: PropertyCategory, db: Session):
     """Background task to scrape and save listings."""
     logger.info(f"Scraping başlıyor: {search_url}")
+    logger.info(f"Seçilen kategori: {kategori.value}")
     
-    scraper = SourceScraper()
+    scraper = None
     try:
+        scraper = SourceScraper()
         # Get all listings from search results with pagination
         listings = scraper.search_listings_with_pagination(search_url, use_pagination=True)
         logger.info(f"Bulunan ilan sayısı: {len(listings)}")
         
+        # Seçilen kategoriye göre property type belirle
+        property_type = kategori.value
+        
+        logger.info(f"Search URL: {search_url}")
+        logger.info(f"Property type: {property_type}")
+        
         # Save search history
         search_history = SearchHistory(
             search_url=search_url,
-            search_params={},
+            search_params={
+                "property_type": property_type
+            },
             results_count=len(listings),
             created_at=datetime.now()
         )
@@ -176,6 +194,11 @@ async def scrape_and_save_listings(search_url: str, db: Session):
                         needs_update = True
                         existing_property.location = listing_data.get('konum', '')
                     
+                    # Property type değişmiş mi?
+                    if existing_property.property_type != property_type:
+                        needs_update = True
+                        existing_property.property_type = property_type
+                    
                     # Raw data değişmiş mi?
                     if existing_property.raw_data != listing_data:
                         needs_update = True
@@ -213,10 +236,13 @@ async def scrape_and_save_listings(search_url: str, db: Session):
                         title=listing_data.get('baslik', ''),
                         price=price,
                         location=listing_data.get('konum', ''),
+                        property_type=property_type,  # URL'den tespit edilen kategori
                         raw_data=listing_data,
                         created_at=datetime.now(),
                         updated_at=datetime.now()
                     )
+                    
+                    logger.info(f"Yeni ilan ekleniyor - URL: {listing_data['url']}, Type: {property_type}")
                     
                     # Özellikleri ekle
                     if 'ozellikler' in listing_data:
@@ -257,32 +283,66 @@ async def scrape_and_save_listings(search_url: str, db: Session):
         logger.error(f"Genel hata: {str(e)}")
         db.rollback()
     finally:
-        if hasattr(scraper, 'driver'):
-            scraper.driver.quit()
+        if scraper and hasattr(scraper, 'driver'):
+            try:
+                scraper.driver.quit()
+                logger.info("WebDriver başarıyla kapatıldı")
+            except Exception as e:
+                logger.error(f"WebDriver kapatılırken hata: {str(e)}")
         
     logger.info("İşlem tamamlandı")
 
 @app.post("/scrape")
 async def start_scraping(
+    request: ScrapeRequest,
     background_tasks: BackgroundTasks,
-    search_url: str = Query(..., description="The HepsiEmlak search URL to scrape")
+    db: Session = Depends(get_db)
 ):
-    """Start a background scraping task."""
-    db = SessionLocal()
+    """Start a background scraping task with specified parameters."""
     try:
-        # Record search history
-        search_history = SearchHistory(search_url=search_url)
+        # URL oluştur
+        search_url = create_hepsiemlak_url(
+            ilce=request.ilce,
+            durum=request.durum,
+            kategori=request.kategori,
+            mahalleler=request.mahalleler
+        )
+        
+        # Varsayılan kategori
+        kategori = request.kategori or PropertyCategory.KONUT
+        
+        # Search history kaydet
+        search_history = SearchHistory(
+            search_url=search_url,
+            search_params={
+                "ilce": request.ilce,
+                "durum": request.durum.value,
+                "kategori": kategori.value,
+                "mahalleler": request.mahalleler
+            },
+            created_at=datetime.now()
+        )
         db.add(search_history)
         db.commit()
-
-        # Start background scraping
-        background_tasks.add_task(scrape_and_save_listings, search_url, db)
-        return {"message": "Scraping started", "search_id": search_history.id}
+        
+        # Background task başlat
+        background_tasks.add_task(
+            scrape_and_save_listings, 
+            search_url=search_url,
+            kategori=kategori,
+            db=db
+        )
+        
+        return {
+            "message": "Scraping started",
+            "search_url": search_url,
+            "search_id": search_history.id
+        }
+        
     except Exception as e:
+        logger.error(f"Scraping başlatılırken hata: {str(e)}")
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        db.close()
 
 @app.get("/properties", response_model=PaginatedResponse)
 async def get_properties(
@@ -295,6 +355,7 @@ async def get_properties(
     province: str = Query('', description="Province (il)"),
     district: str = Query('', description="District (ilçe)"),
     neighborhood: str = Query('', description="Neighborhood (mahalle)"),
+    status: str = Query('', description="Property status (satilik/kiralik)"),
     db: Session = Depends(get_db)
 ):
     """Get all properties with optional filters."""
@@ -302,7 +363,7 @@ async def get_properties(
         logger.info(f"Received request with params: skip={skip}, limit={limit}, "
                    f"local_kw={local_kw}, min_price={min_price}, max_price={max_price}, "
                    f"category={category}, province={province}, district={district}, "
-                   f"neighborhood={neighborhood}")
+                   f"neighborhood={neighborhood}, status={status}")
         
         # Base query with eager loading of relationships
         query = db.query(Property).options(
@@ -326,12 +387,14 @@ async def get_properties(
             
             # Kategori filtresi
             if category:
-                query = query.filter(
-                    or_(
-                        Property.property_type.ilike(f"%{category}%"),
-                        cast(Property.raw_data['ilan_tipi'], String).ilike(f"%{category}%")
-                    )
-                )
+                logger.info(f"Filtering by category: {category}")
+                # Frontend'den gelen kategori değerini normalize et
+                normalized_category = category.replace('-', '')  # 'is-yeri' -> 'isyeri'
+                query = query.filter(Property.property_type == normalized_category)
+                # Debug için tüm property type'ları logla
+                all_types = db.query(Property.property_type).distinct().all()
+                logger.info(f"Available property types: {[t[0] for t in all_types]}")
+                logger.info(f"Normalized category: {normalized_category}")
             
             # İl filtresi
             if province:
@@ -339,7 +402,17 @@ async def get_properties(
             
             # İlçe filtresi
             if district:
-                query = query.filter(Property.location.ilike(f"%{district}%"))
+                logger.info(f"Filtering by district: {district}")
+                # URL'den gelen ilçe adını temizle (örn: "beykoz-satilik" -> "beykoz")
+                clean_district = district.split('-')[0] if '-' in district else district
+                query = query.filter(Property.location.ilike(f"%{clean_district}%"))
+                logger.info(f"Clean district name: {clean_district}")
+            
+            # Durum filtresi (satilik/kiralik)
+            if status:
+                logger.info(f"Filtering by status: {status}")
+                # URL'den durum bilgisini al
+                query = query.filter(Property.url.ilike(f"%-{status}/%"))
             
             # Mahalle filtresi
             if neighborhood:
@@ -491,79 +564,112 @@ async def get_search_history():
     finally:
         db.close()
 
-@app.get("/locations")
-async def get_locations(db: Session = Depends(get_db)):
-    """Get all unique provinces, districts and neighborhoods from properties."""
+@app.get("/categories", response_model=CategoryResponse)
+async def get_categories():
+    """Get all available categories and status types."""
+    return {
+        "categories": list(PropertyCategory),
+        "status_types": list(PropertyStatus)
+    }
+
+@app.get("/locations/{il}", response_model=LocationResponse)
+async def get_locations(il: str, db: Session = Depends(get_db)):
+    """Get all locations for a specific province."""
     try:
-        # Tüm location bilgilerini al
+        # İl bazlı lokasyonları getir
         locations = db.query(Property.location).distinct().all()
         
-        # İl, ilçe ve mahalle bilgilerini ayır
-        provinces = set()
-        districts = set()
-        neighborhoods = set()
+        iller = set()
+        ilceler = {}
+        mahalleler = {}
         
         for loc in locations:
-            if loc[0]:  # location None değilse
-                parts = loc[0].split('/')  # "İstanbul / Beşiktaş / Nisbetiye Mah." formatını ayır
-                parts = [p.strip() for p in parts]  # Boşlukları temizle
+            if loc[0]:
+                parts = [p.strip() for p in loc[0].split('/')]
                 
                 if len(parts) >= 1:
-                    provinces.add(parts[0])
+                    iller.add(parts[0])
+                    if parts[0] not in ilceler:
+                        ilceler[parts[0]] = set()
+                
                 if len(parts) >= 2:
-                    districts.add(parts[1])
+                    ilceler[parts[0]].add(parts[1])
+                    if parts[1] not in mahalleler:
+                        mahalleler[parts[1]] = set()
+                
                 if len(parts) >= 3:
-                    neighborhoods.add(parts[2])
+                    mahalleler[parts[1]].add(parts[2])
         
+        # Set'leri list'e çevir
         return {
-            "provinces": sorted(list(provinces)),
-            "districts": sorted(list(districts)),
-            "neighborhoods": sorted(list(neighborhoods))
+            "iller": sorted(list(iller)),
+            "ilceler": {k: sorted(list(v)) for k, v in ilceler.items()},
+            "mahalleler": {k: sorted(list(v)) for k, v in mahalleler.items()}
         }
+        
     except Exception as e:
-        logger.error(f"Error fetching locations: {str(e)}")
+        logger.error(f"Lokasyonlar getirilirken hata: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/update-property-types")
+async def update_property_types(db: Session = Depends(get_db)):
+    """Update property types based on URLs."""
+    try:
+        # Tüm property'leri getir
+        properties = db.query(Property).all()
+        updated_count = 0
+        
+        for prop in properties:
+            old_type = prop.property_type
+            new_type = None
+            
+            # URL'den kategori bilgisini çıkar
+            url_parts = prop.url.lower().split('/')
+            
+            # URL formatı: .../beykoz-satilik/isyeri gibi veya .../isyeri-bina, .../dukkan-magaza gibi
+            if len(url_parts) >= 2:
+                last_part = url_parts[-1].split('?')[0]  # Query parametrelerini kaldır
+                last_part = last_part.split('-')[0]  # Alt kategorileri kaldır (isyeri-bina -> isyeri)
+                
+                if last_part == 'arsa':
+                    new_type = 'arsa'
+                elif last_part in ['isyeri', 'dukkan', 'plaza', 'ofis', 'depo', 'cafe']:
+                    new_type = 'isyeri'
+                elif last_part == 'devremulk':
+                    new_type = 'devremulk'
+                elif last_part == 'turistik-isletme':
+                    new_type = 'turistik-isletme'
+                else:
+                    new_type = 'konut'
+            else:
+                new_type = 'konut'
+            
+            if old_type != new_type:
+                prop.property_type = new_type
+                updated_count += 1
+                logger.info(f"Property type updated: {old_type} -> {new_type} for URL: {prop.url}")
+        
+        db.commit()
+        return {"message": f"Updated {updated_count} properties"}
+        
+    except Exception as e:
+        logger.error(f"Error updating property types: {str(e)}")
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
 
-@app.get("/categories")
-async def get_categories(db: Session = Depends(get_db)):
-    """Get all unique property categories."""
+@app.get("/debug/property-types")
+async def get_property_types(db: Session = Depends(get_db)):
+    """Get all unique property types for debugging."""
     try:
-        # Property type ve raw_data'dan kategorileri al
-        categories = set()
-        
-        # Property type'dan kategorileri al
-        property_types = db.query(Property.property_type).distinct().all()
-        for pt in property_types:
-            if pt[0]:
-                categories.add(pt[0].lower())
-        
-        # Raw data'dan kategorileri al
-        raw_types = db.query(
-            cast(Property.raw_data['ilan_tipi'], String)
-        ).distinct().all()
-        
-        for rt in raw_types:
-            if rt[0]:
-                categories.add(rt[0].lower())
-        
-        # Temel kategorilere ayır
-        mapped_categories = set()
-        for category in categories:
-            if 'konut' in category or 'daire' in category or 'ev' in category:
-                mapped_categories.add('konut')
-            elif 'arsa' in category or 'tarla' in category:
-                mapped_categories.add('arsa')
-            elif 'isyeri' in category or 'işyeri' in category or 'dükkan' in category or 'ofis' in category:
-                mapped_categories.add('isyeri')
-        
+        types = db.query(Property.property_type, func.count(Property.id)).group_by(Property.property_type).all()
         return {
-            "categories": sorted(list(mapped_categories))
+            "property_types": [
+                {"type": t[0], "count": t[1]} 
+                for t in types
+            ]
         }
-    except Exception as e:
-        logger.error(f"Error fetching categories: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
 

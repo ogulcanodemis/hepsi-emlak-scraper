@@ -16,6 +16,18 @@ const Navbar: React.FC = () => {
     return location.pathname === path;
   };
 
+  const linkStyle = {
+    color: 'white',
+    textDecoration: 'none',
+    marginLeft: 2,
+  };
+
+  const activeLinkStyle = {
+    ...linkStyle,
+    fontWeight: 'bold',
+    borderBottom: '2px solid white',
+  };
+
   return (
     <AppBar position="static" color="primary" elevation={0}>
       <Container maxWidth="lg">
@@ -39,34 +51,25 @@ const Navbar: React.FC = () => {
               component={RouterLink}
               to="/"
               color="inherit"
-              sx={{
-                fontWeight: isActive('/') ? 700 : 400,
-                textDecoration: isActive('/') ? 'underline' : 'none',
-              }}
+              sx={isActive('/') ? activeLinkStyle : linkStyle}
             >
-              Ana Sayfa
+              ANA SAYFA
             </Button>
             <Button
               component={RouterLink}
               to="/properties"
               color="inherit"
-              sx={{
-                fontWeight: isActive('/properties') ? 700 : 400,
-                textDecoration: isActive('/properties') ? 'underline' : 'none',
-              }}
+              sx={isActive('/properties') ? activeLinkStyle : linkStyle}
             >
-              İlanlar
+              İLANLAR
             </Button>
             <Button
               component={RouterLink}
               to="/search-history"
               color="inherit"
-              sx={{
-                fontWeight: isActive('/search-history') ? 700 : 400,
-                textDecoration: isActive('/search-history') ? 'underline' : 'none',
-              }}
+              sx={isActive('/search-history') ? activeLinkStyle : linkStyle}
             >
-              Arama Geçmişi
+              ARAMA GEÇMİŞİ
             </Button>
           </Box>
         </Toolbar>

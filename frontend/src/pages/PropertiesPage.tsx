@@ -17,9 +17,12 @@ import {
   Alert,
   Select,
   MenuItem,
+  Container,
+  Pagination,
 } from '@mui/material';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import axios from 'axios';
+import { PropertyCategory } from '../types';
 
 interface Property {
   id: number;
@@ -46,10 +49,11 @@ interface FilterParams {
   maxPrice?: number;
   location?: string;
   localKw?: string;
-  category?: string;  // Konut, Arsa, İşyeri
-  province?: string;  // İl
-  district?: string;  // İlçe
-  neighborhood?: string;  // Mahalle
+  category?: string;
+  province?: string;
+  district?: string;
+  neighborhood?: string;
+  status?: string;
 }
 
 interface PaginatedResponse {
@@ -71,16 +75,79 @@ interface CategoryData {
   categories: string[];
 }
 
+interface PropertyType {
+  type: string;
+  count: number;
+}
+
+interface PropertyTypesResponse {
+  property_types: PropertyType[];
+}
+
+const CATEGORY_MAPPING = {
+  'konut': 'konut',
+  'arsa': 'arsa',
+  'isyeri': 'is-yeri',  // URL'deki format ile eşleştiriyoruz
+  'devremulk': 'devremulk',
+  'turistik': 'turistik-isletme'
+};
+
+const CATEGORY_LABELS = {
+  'konut': 'Konut',
+  'arsa': 'Arsa',
+  'isyeri': 'İş Yeri',
+  'devremulk': 'Devremülk',
+  'turistik': 'Turistik Tesis'
+};
+
+// Durum seçenekleri için sabit
+const STATUS_LABELS = {
+  'satilik': 'Satılık',
+  'kiralik': 'Kiralık'
+};
+
+// İlçe listesi için sabit
+const DISTRICTS = [
+  'Adalar', 'Arnavutköy', 'Ataşehir', 'Avcılar', 'Bağcılar', 'Bahçelievler',
+  'Bakırköy', 'Başakşehir', 'Bayrampaşa', 'Beşiktaş', 'Beykoz', 'Beylikdüzü',
+  'Beyoğlu', 'Büyükçekmece', 'Çatalca', 'Çekmeköy', 'Esenler', 'Esenyurt',
+  'Eyüpsultan', 'Fatih', 'Gaziosmanpaşa', 'Güngören', 'Kadıköy', 'Kağıthane',
+  'Kartal', 'Küçükçekmece', 'Maltepe', 'Pendik', 'Sancaktepe', 'Sarıyer',
+  'Silivri', 'Sultanbeyli', 'Sultangazi', 'Şile', 'Şişli', 'Tuzla', 'Ümraniye',
+  'Üsküdar', 'Zeytinburnu'
+];
+
 const PropertiesPage: React.FC = () => {
-  const [filters, setFilters] = useState<FilterParams>({
-    localKw: '',
-    minPrice: undefined,
-    maxPrice: undefined,
-    location: '',
-    category: '',
-    province: '',
-    district: '',
-    neighborhood: ''
+  const location = useLocation();
+  const [filters, setFilters] = useState<FilterParams>(() => {
+    // URL'den parametreleri al
+    const params = new URLSearchParams(location.search);
+    const pathParts = location.pathname.split('/');
+    
+    // URL path'inden ilçe ve durum bilgisini çıkar
+    // Örnek: /beykoz-satilik -> district: beykoz, status: satilik
+    let district = '';
+    let status = '';
+    if (pathParts.length > 1) {
+      const locationPart = pathParts[1];
+      const parts = locationPart.split('-');
+      if (parts.length === 2) {
+        district = parts[0];
+        status = parts[1];
+      }
+    }
+
+    return {
+      localKw: params.get('local_kw') || '',
+      minPrice: params.get('min_price') ? Number(params.get('min_price')) : undefined,
+      maxPrice: params.get('max_price') ? Number(params.get('max_price')) : undefined,
+      location: params.get('location') || '',
+      category: params.get('category') || '',
+      province: params.get('province') || '',
+      district: district || '',
+      neighborhood: params.get('neighborhood') || '',
+      status: status || ''
+    };
   });
   const [page, setPage] = useState(1);
   const limit = 12;
@@ -102,9 +169,20 @@ const PropertiesPage: React.FC = () => {
     }
   });
 
+  // Debug query to check property types
+  const { data: propertyTypes } = useQuery<PropertyTypesResponse>({
+    queryKey: ['propertyTypes'],
+    queryFn: async () => {
+      const response = await axios.get('http://localhost:8000/debug/property-types');
+      console.log('Property Types:', response.data);
+      return response.data;
+    }
+  });
+
   const { data: response, isLoading, error } = useQuery<PaginatedResponse>({
     queryKey: ['properties', page, filters],
     queryFn: async () => {
+      console.log('Requesting with filters:', filters);
       const response = await axios.get('http://localhost:8000/properties', {
         params: {
           skip: (page - 1) * limit,
@@ -116,9 +194,11 @@ const PropertiesPage: React.FC = () => {
           category: filters.category,
           province: filters.province,
           district: filters.district,
-          neighborhood: filters.neighborhood
+          neighborhood: filters.neighborhood,
+          status: filters.status
         },
       });
+      console.log('Response:', response.data);
       return response.data;
     },
   });
@@ -148,247 +228,159 @@ const PropertiesPage: React.FC = () => {
   }
 
   return (
-    <Box>
-      <Typography variant="h4" component="h1" gutterBottom>
-        Emlak İlanları
-      </Typography>
+    <Container maxWidth="lg">
+      <Box sx={{ my: 4 }}>
+        <Grid container spacing={2} sx={{ mb: 4 }}>
+          <Grid item xs={12} md={6}>
+            <TextField
+              fullWidth
+              label="Arama"
+              value={filters.localKw || ''}
+              onChange={handleFilterChange('localKw')}
+            />
+          </Grid>
+          <Grid item xs={12} md={6}>
+            <FormControl fullWidth>
+              <InputLabel>Kategori</InputLabel>
+              <Select
+                value={filters.category || ''}
+                onChange={(e) => {
+                  console.log('Selected category:', e.target.value);
+                  setFilters(prev => ({ ...prev, category: e.target.value }));
+                }}
+                label="Kategori"
+              >
+                <MenuItem value="">Tümü</MenuItem>
+                {Object.entries(CATEGORY_LABELS).map(([value, label]) => (
+                  <MenuItem key={value} value={value}>
+                    {label}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </Grid>
+          <Grid item xs={12} md={6}>
+            <FormControl fullWidth>
+              <InputLabel>Durum</InputLabel>
+              <Select
+                value={filters.status || ''}
+                onChange={(e) => {
+                  console.log('Selected status:', e.target.value);
+                  setFilters(prev => ({ ...prev, status: e.target.value }));
+                }}
+                label="Durum"
+              >
+                <MenuItem value="">Tümü</MenuItem>
+                {Object.entries(STATUS_LABELS).map(([value, label]) => (
+                  <MenuItem key={value} value={value}>
+                    {label}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </Grid>
+          <Grid item xs={12} md={6}>
+            <FormControl fullWidth>
+              <InputLabel>İlçe</InputLabel>
+              <Select
+                value={filters.district || ''}
+                onChange={(e) => {
+                  console.log('Selected district:', e.target.value);
+                  setFilters(prev => ({ ...prev, district: e.target.value }));
+                }}
+                label="İlçe"
+              >
+                <MenuItem value="">Tümü</MenuItem>
+                {DISTRICTS.map((district) => (
+                  <MenuItem key={district} value={district.toLowerCase()}>
+                    {district}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </Grid>
+        </Grid>
 
-      {/* Filters */}
-      <Card sx={{ mb: 4, p: 2 }}>
-        <form onSubmit={handleFilterSubmit}>
-          <Grid container spacing={2} alignItems="flex-end">
-            {/* Kategori seçimi */}
-            <Grid item xs={12} sm={6} md={3}>
-              <FormControl fullWidth>
-                <InputLabel>Kategori</InputLabel>
-                <Select
-                  value={filters.category || ''}
-                  onChange={(e) => setFilters(prev => ({ ...prev, category: e.target.value }))}
-                  label="Kategori"
-                >
-                  <MenuItem value="">Tümü</MenuItem>
-                  {categoryData?.categories.map((category) => (
-                    <MenuItem key={category} value={category}>
-                      {category === 'konut' ? 'Konut' : 
-                       category === 'arsa' ? 'Arsa' : 
-                       category === 'isyeri' ? 'İşyeri' : category}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
+        {/* Property type debug info */}
+        {propertyTypes && (
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="caption" color="text.secondary">
+              Mevcut kategoriler: {propertyTypes.property_types.map((t: PropertyType) => `${t.type} (${t.count})`).join(', ')}
+            </Typography>
+          </Box>
+        )}
+
+        {isLoading ? (
+          <Typography>Yükleniyor...</Typography>
+        ) : (
+          <>
+            <Grid container spacing={3}>
+              {response?.items.map((property: Property) => (
+                <Grid item xs={12} sm={6} md={4} key={property.id}>
+                  <Card
+                    component={Link}
+                    to={`/properties/${property.id}`}
+                    sx={{
+                      height: '100%',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      textDecoration: 'none',
+                      color: 'inherit',
+                      '&:hover': {
+                        transform: 'translateY(-4px)',
+                        transition: 'transform 0.2s ease-in-out',
+                      },
+                    }}
+                  >
+                    <CardMedia
+                      component="img"
+                      height="200"
+                      image={property.images[0] || '/placeholder-house.jpg'}
+                      alt={property.title || ''}
+                    />
+                    <CardContent>
+                      <Typography gutterBottom variant="h6" component="div" noWrap>
+                        {property.title || ''}
+                      </Typography>
+                      <Typography variant="h6" color="primary" gutterBottom>
+                        {property.price?.toLocaleString('tr-TR') || ''} TL
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" noWrap>
+                        {property.location || ''}
+                      </Typography>
+                      <Box sx={{ mt: 1 }}>
+                        {property.features.slice(0, 3).map((feature, index) => (
+                          <Typography
+                            key={index}
+                            variant="body2"
+                            color="text.secondary"
+                            component="span"
+                            sx={{ mr: 1 }}
+                          >
+                            • {feature}
+                          </Typography>
+                        ))}
+                      </Box>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              ))}
             </Grid>
 
-            {/* İl seçimi */}
-            <Grid item xs={12} sm={6} md={3}>
-              <FormControl fullWidth>
-                <InputLabel>İl</InputLabel>
-                <Select
-                  value={filters.province || ''}
-                  onChange={(e) => setFilters(prev => ({ ...prev, province: e.target.value }))}
-                  label="İl"
-                >
-                  <MenuItem value="">Tümü</MenuItem>
-                  {locationData?.provinces.map((province) => (
-                    <MenuItem key={province} value={province}>
-                      {province}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Grid>
-
-            {/* İlçe seçimi */}
-            <Grid item xs={12} sm={6} md={3}>
-              <FormControl fullWidth>
-                <InputLabel>İlçe</InputLabel>
-                <Select
-                  value={filters.district || ''}
-                  onChange={(e) => setFilters(prev => ({ ...prev, district: e.target.value }))}
-                  label="İlçe"
-                >
-                  <MenuItem value="">Tümü</MenuItem>
-                  {locationData?.districts.map((district) => (
-                    <MenuItem key={district} value={district}>
-                      {district}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Grid>
-
-            {/* Mahalle seçimi */}
-            <Grid item xs={12} sm={6} md={3}>
-              <FormControl fullWidth>
-                <InputLabel>Mahalle</InputLabel>
-                <Select
-                  value={filters.neighborhood || ''}
-                  onChange={(e) => setFilters(prev => ({ ...prev, neighborhood: e.target.value }))}
-                  label="Mahalle"
-                >
-                  <MenuItem value="">Tümü</MenuItem>
-                  {locationData?.neighborhoods.map((neighborhood) => (
-                    <MenuItem key={neighborhood} value={neighborhood}>
-                      {neighborhood}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Grid>
-
-            {/* Mevcut filtreler */}
-            <Grid item xs={12} sm={6} md={3}>
-              <TextField
-                fullWidth
-                label="Arama"
-                variant="outlined"
-                value={filters.localKw || ''}
-                onChange={handleFilterChange('localKw')}
-                placeholder="İlan başlığında ara..."
-              />
-            </Grid>
-
-            <Grid item xs={12} sm={6} md={3}>
-              <FormControl fullWidth variant="outlined">
-                <InputLabel htmlFor="min-price">Minimum Fiyat</InputLabel>
-                <OutlinedInput
-                  id="min-price"
-                  type="number"
-                  value={filters.minPrice || ''}
-                  onChange={handleFilterChange('minPrice')}
-                  endAdornment={<InputAdornment position="end">TL</InputAdornment>}
-                  label="Minimum Fiyat"
+            {response && (
+              <Box sx={{ mt: 4, display: 'flex', justifyContent: 'center' }}>
+                <Pagination
+                  count={response.total_pages}
+                  page={page}
+                  onChange={(_, value) => setPage(value)}
+                  color="primary"
                 />
-              </FormControl>
-            </Grid>
-
-            <Grid item xs={12} sm={6} md={3}>
-              <FormControl fullWidth variant="outlined">
-                <InputLabel htmlFor="max-price">Maksimum Fiyat</InputLabel>
-                <OutlinedInput
-                  id="max-price"
-                  type="number"
-                  value={filters.maxPrice || ''}
-                  onChange={handleFilterChange('maxPrice')}
-                  endAdornment={<InputAdornment position="end">TL</InputAdornment>}
-                  label="Maksimum Fiyat"
-                />
-              </FormControl>
-            </Grid>
-
-            <Grid item xs={12}>
-              <Box sx={{ display: 'flex', gap: 2, justifyContent: 'flex-end' }}>
-                <Button
-                  variant="outlined"
-                  onClick={() => setFilters({
-                    localKw: '',
-                    minPrice: undefined,
-                    maxPrice: undefined,
-                    location: '',
-                    category: '',
-                    province: '',
-                    district: '',
-                    neighborhood: ''
-                  })}
-                >
-                  Filtreleri Temizle
-                </Button>
-                <Button type="submit" variant="contained" color="primary">
-                  Filtrele
-                </Button>
               </Box>
-            </Grid>
-          </Grid>
-        </form>
-      </Card>
-
-      {/* Loading State */}
-      {isLoading && (
-        <Box display="flex" justifyContent="center" my={4}>
-          <CircularProgress />
-        </Box>
-      )}
-
-      {/* Property Grid */}
-      <Grid container spacing={3}>
-        {response?.items?.map((property: Property) => (
-          <Grid item xs={12} sm={6} md={4} key={property.id}>
-            <Card
-              component={Link}
-              to={`/properties/${property.id}`}
-              sx={{
-                height: '100%',
-                display: 'flex',
-                flexDirection: 'column',
-                textDecoration: 'none',
-                color: 'inherit',
-                '&:hover': {
-                  transform: 'translateY(-4px)',
-                  transition: 'transform 0.2s ease-in-out',
-                },
-              }}
-            >
-              <CardMedia
-                component="img"
-                height="200"
-                image={property.images[0] || '/placeholder-house.jpg'}
-                alt={property.title || ''}
-              />
-              <CardContent>
-                <Typography gutterBottom variant="h6" component="div" noWrap>
-                  {property.title || ''}
-                </Typography>
-                <Typography variant="h6" color="primary" gutterBottom>
-                  {property.price?.toLocaleString('tr-TR') || ''} TL
-                </Typography>
-                <Typography variant="body2" color="text.secondary" noWrap>
-                  {property.location || ''}
-                </Typography>
-                <Box sx={{ mt: 1 }}>
-                  {property.features.slice(0, 3).map((feature, index) => (
-                    <Typography
-                      key={index}
-                      variant="body2"
-                      color="text.secondary"
-                      component="span"
-                      sx={{ mr: 1 }}
-                    >
-                      • {feature}
-                    </Typography>
-                  ))}
-                </Box>
-              </CardContent>
-            </Card>
-          </Grid>
-        ))}
-      </Grid>
-
-      {/* Pagination Info */}
-      {!isLoading && response && (
-        <Box sx={{ mt: 2, mb: 2, textAlign: 'center' }}>
-          <Typography variant="body2" color="text.secondary">
-            Toplam {response.total} ilan içinden {((page - 1) * limit) + 1} - {Math.min(page * limit, response.total)} arası gösteriliyor
-          </Typography>
-        </Box>
-      )}
-
-      {/* Pagination */}
-      <Box sx={{ mt: 4, display: 'flex', justifyContent: 'center', gap: 2 }}>
-        <Button
-          variant="outlined"
-          disabled={!response?.has_previous || isLoading}
-          onClick={() => setPage((p) => Math.max(1, p - 1))}
-        >
-          Önceki Sayfa
-        </Button>
-        <Button
-          variant="outlined"
-          disabled={!response?.has_next || isLoading}
-          onClick={() => setPage((p) => p + 1)}
-        >
-          Sonraki Sayfa
-        </Button>
+            )}
+          </>
+        )}
       </Box>
-    </Box>
+    </Container>
   );
 };
 

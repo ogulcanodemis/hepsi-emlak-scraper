@@ -11,6 +11,7 @@ import HomePage from './pages/HomePage';
 import PropertiesPage from './pages/PropertiesPage';
 import PropertyDetailPage from './pages/PropertyDetailPage';
 import SearchHistoryPage from './pages/SearchHistoryPage';
+import ScrapeForm from './components/ScrapeForm';
 
 // Create a client
 const queryClient = new QueryClient();
